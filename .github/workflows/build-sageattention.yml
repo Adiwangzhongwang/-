@@ -1,0 +1,121 @@
+name: Build SageAttention Windows wheel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    env:
+      PYTHON_VERSION: "3.13"
+      TORCH_VERSION: "2.12.1"
+      CUDA_VERSION: "13.0.1"
+      SAGE_ATTENTION_REF: "v2.2.0-windows.post7"
+      TORCH_CUDA_ARCH_LIST: "8.0 8.6"
+      EXT_PARALLEL: "1"
+      MAX_JOBS: "4"
+      SAGEATTENTION_WHEEL_VERSION_SUFFIX: ".post7+cu130torch2.12.1"
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: x64
+
+      - name: Install CUDA toolkit
+        id: cuda-toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+
+      - name: Configure MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      - name: Install Python build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip setuptools wheel ninja packaging
+          python -m pip install "torch==$env:TORCH_VERSION" `
+            --index-url https://download.pytorch.org/whl/cu130
+
+      - name: Check build environment
+        shell: pwsh
+        run: |
+          python -c "import sys, torch; print(sys.version); print(torch.__version__); print(torch.version.cuda)"
+          nvcc --version
+          Get-Command cl.exe | Select-Object Source
+
+      - name: Clone SageAttention
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:RUNNER_TEMP "SageAttention"
+          git clone --depth 1 --branch $env:SAGE_ATTENTION_REF `
+            https://github.com/woct0rdho/SageAttention $src
+
+      - name: Build wheel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = Join-Path $env:RUNNER_TEMP "SageAttention"
+          $out = Join-Path $env:RUNNER_TEMP "wheels"
+          $tmp = Join-Path $env:RUNNER_TEMP "tmp"
+
+          New-Item -ItemType Directory -Force $out, $tmp | Out-Null
+          $env:CUDA_HOME = $env:CUDA_PATH
+          $env:TMP = $tmp
+          $env:TEMP = $tmp
+          $env:PATH = "$env:CUDA_PATH\bin;$env:PATH"
+
+          Push-Location $src
+          try {
+            python -m pip wheel . `
+              --no-build-isolation `
+              --no-deps `
+              -v `
+              -w $out
+            if ($LASTEXITCODE -ne 0) {
+              throw "SageAttention wheel build failed with exit code $LASTEXITCODE"
+            }
+          }
+          finally {
+            Pop-Location
+          }
+
+          Get-ChildItem $out -Filter "*.whl" | Format-List FullName, Length
+
+      - name: Inspect wheel
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem (Join-Path $env:RUNNER_TEMP "wheels") -Filter "*.whl" |
+            Select-Object -First 1
+          if (-not $wheel) {
+            throw "No wheel was produced"
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($wheel.FullName)
+          try {
+            $archive.Entries |
+              Where-Object { $_.FullName -match "_fused.*\.pyd$|WHEEL$" } |
+              Select-Object FullName, Length |
+              Format-Table -AutoSize
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: sageattention-2.2.0-py313-torch2.12.1-cu130-win_amd64
+          path: ${{ runner.temp }}/wheels/*.whl
+          if-no-files-found: error
+          retention-days: 14
