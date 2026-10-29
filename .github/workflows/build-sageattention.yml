@@ -19,6 +19,7 @@ jobs:
       TORCH_CUDA_ARCH_LIST: "8.0 8.6"
       EXT_PARALLEL: "1"
       MAX_JOBS: "4"
+      DISTUTILS_USE_SDK: "1"
       SAGEATTENTION_WHEEL_VERSION_SUFFIX: ".post7+cu130torch2.12.1"
 
     steps:
